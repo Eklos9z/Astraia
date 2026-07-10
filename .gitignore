@@ -5,7 +5,16 @@ data/
 doc/
 
 *.7z
+# 忽略安卓堆转储文件
+*.hprof
 
+# 忽略 Gradle 临时编译文件和本地配置文件
+.gradle/
+/build/
+local.properties
+
+# （可选）如果你不想把编译出的本地.so 库提交到 Git，也可以在这里忽略
+# *.so
 .DS_Store
 =======
 *.o
