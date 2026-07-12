@@ -129,9 +129,17 @@ static void cont_observer(Result *result)
         }
     }
 
-    /* --- Emit per-move bounds as a second callback (NEW) ---
+    /* --- Emit per-move scores as a second callback (FIXED) ---
+     *
+     * Previous code used result->bound[move->x] which stores the GLOBAL
+     * aspiration window -- all moves shared the same [low, high], causing
+     * every cell to display the identical score.
+     *
+     * FIX: use move->score, which PVS_root sets PER MOVE during search.
+     * lo==hi signals an exact score (as opposed to a bound range).
+     *
      * Schema: {"type":"bounds","d":depth,"n":nodes,"moves":[
-     *   {"x":"f5","lo":2,"hi":6,"c":123}, ...]}
+     *   {"x":"f5","lo":4,"hi":4,"c":123}, ...]}
      */
     Search *active_search = (Search *)atomic_load(&g_active_search_ptr);
     if (active_search != NULL && !movelist_is_empty(&active_search->movelist)) {
@@ -148,15 +156,15 @@ static void cont_observer(Result *result)
             if (move->x < A1 || move->x > H8) continue;
             char coord[5];
             square_to_coord(move->x, coord);
-            int lo = result->bound[move->x].lower;
-            int hi = result->bound[move->x].upper;
-            /* Signal unsearched moves by setting both to SCORE_MIN */
-            if (lo == SCORE_MIN && hi == SCORE_MAX) {
-                lo = SCORE_MIN; hi = SCORE_MIN;
-            }
+            /* Use per-move search score instead of global bounds.
+             * Clamp to valid range; unsearched moves keep their
+             * heuristic ordering score (set by movelist_evaluate). */
+            int score = move->score;
+            if (score < SCORE_MIN) score = SCORE_MIN;
+            if (score > SCORE_MAX) score = SCORE_MAX;
             bw = snprintf(bounds_json + used, sizeof bounds_json - used,
                 "%s{\"x\":\"%s\",\"lo\":%d,\"hi\":%d,\"c\":%u}",
-                first ? "" : ",", coord, lo, hi, move->cost);
+                first ? "" : ",", coord, score, score, move->cost);
             if (bw < 0 || (size_t)bw >= sizeof bounds_json - used) break;
             used += (size_t)bw;
             first = false;
@@ -470,17 +478,15 @@ Java_com_eklos_astraia_EdaxContinuousBridge_nativeGetMoveBounds(
             char coord[5];
             square_to_coord(move->x, coord);
 
-            int lo = result->bound[move->x].lower;
-            int hi = result->bound[move->x].upper;
-
-            /* Skip moves that haven't been searched yet. */
-            if (lo == SCORE_MIN && hi == SCORE_MAX) {
-                lo = hi = SCORE_MIN; /* signal "unknown" */
-            }
+            /* Use per-move search score instead of global bounds (fixed).
+             * Clamp to valid range. */
+            int score = move->score;
+            if (score < SCORE_MIN) score = SCORE_MIN;
+            if (score > SCORE_MAX) score = SCORE_MAX;
 
             written = snprintf(json + used, sizeof json - used,
                 "%s{\"move\":\"%s\",\"lo\":%d,\"hi\":%d}",
-                first ? "" : ",", coord, lo, hi);
+                first ? "" : ",", coord, score, score);
             if (written < 0 || (size_t)written >= sizeof json - used) break;
             used += (size_t)written;
             first = false;

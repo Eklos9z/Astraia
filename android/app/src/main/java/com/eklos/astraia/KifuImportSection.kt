@@ -69,8 +69,8 @@ fun KifuImportSection(
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                     val clip = clipboard?.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
                     if (clip.isNotBlank()) {
-                        val count = onImport(clip)
-                        Toast.makeText(context, "$count moves imported", Toast.LENGTH_SHORT).show()
+                        onImport(clip)
+                        // Feedback is shown via the ViewModel's statusMessage → Snackbar
                     } else {
                         Toast.makeText(context, "Clipboard is empty", Toast.LENGTH_SHORT).show()
                     }

@@ -215,7 +215,7 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         // Trim history after this node (for now; branching will preserve alternatives)
         val idx = _gameNodes.indexOfFirst { it.id == nodeIndex }
         if (idx >= 0) {
-            while (_gameNodes.size > idx + 1) _gameNodes.removeLast()
+            while (_gameNodes.size > idx + 1) _gameNodes.removeAt(_gameNodes.size - 1)
         }
 
         _uiState.update { it.copy(
@@ -234,7 +234,7 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
     /** Undo the last move. */
     fun undoMove(): Boolean {
         if (_gameNodes.isEmpty()) return false
-        _gameNodes.removeLast()
+        _gameNodes.removeAt(_gameNodes.size - 1)
 
         val prevBoard = if (_gameNodes.isNotEmpty()) {
             _gameNodes.last().board
@@ -297,6 +297,13 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         )}
 
         startAnalysis(board, legalMoves = legalMoves)
+    }
+
+    /** Export the current game tree as a compact kifu string. */
+    fun exportKifu(): String {
+        val moves = _gameNodes.mapNotNull { it.move }
+        if (moves.isEmpty()) return ""
+        return moves.joinToString("")  // "f5d6c3e2..."
     }
 
     /** Clear the status message after it's been shown. */

@@ -62,19 +62,24 @@ private val DarkColors = BoardColors(
 // ─────────────────────────────────────────────────────────────────
 
 /**
- * Convert centi-disc score to a human-readable stone difference.
+ * Convert Edax score to a human-readable stone difference.
  *
- * Edax scores are in centi-discs (+100 = +1 disc advantage at endgame).
- * This converts to a 1-decimal stone-difference string.
+ * Edax scores are integers in [-64, +64] representing the expected
+ * disc advantage at endgame (NOT centi-discs).
  *
- * Examples: +400 → "+4.0", -250 → "−2.5", 0 → "±0.0"
+ * When lo == hi the score is exact; otherwise a range is shown.
+ *
+ * Examples: +4 → "+4", -12 → "−12", 0 → "±0"
  */
-private fun formatStoneDiff(centiDiscs: Int): String {
-    val stones = centiDiscs / 100.0
-    return when {
-        stones >= 0.05 -> "+%.1f".format(stones)
-        stones <= -0.05 -> "−%.1f".format(-stones)  // Unicode MINUS SIGN
-        else -> "±0.0"                                // ±
+private fun formatStoneDiff(lo: Int, hi: Int): String {
+    return if (lo == hi) {
+        when {
+            lo > 0  -> "+$lo"
+            lo < 0  -> "−${-lo}"   // Unicode MINUS SIGN
+            else    -> "±0"
+        }
+    } else {
+        "${lo}…${hi}"
     }
 }
 
@@ -181,7 +186,7 @@ fun BoardAnalysisPanel(
             for (si in 0 until 64) {
                 val row = si / 8
                 val col = si % 8
-                val ei = col * 8 + row          // 90° Edax coordinate mapping
+                val ei = row * 8 + col          // Edax index: rank-major (a1=0, b1=1, ..., h1=7, a2=8, ...)
                 val cx = bx + col * cell + cell * 0.5f
                 val cy = by + row * cell + cell * 0.5f
 
@@ -205,17 +210,17 @@ fun BoardAnalysisPanel(
                         val moveName = screenIdxToMove(si)
                         if (moveName in legalSet) {
                             val bound = moveBoundMap[moveName]
-                            if (bound != null && bound.lo > Int.MIN_VALUE && bound.hi > Int.MIN_VALUE) {
+                            if (bound != null && bound.lo > Int.MIN_VALUE) {
                                 drawCircle(
                                     color = pal.hintCircle,
                                     radius = discR * 0.88f,
                                     center = Offset(cx, cy)
                                 )
-                                val scoreMid = (bound.lo + bound.hi) / 2
                                 drawScoreMatrix(
                                     pal = pal, cell = cell,
                                     cx = cx, cy = cy,
-                                    scoreMid = scoreMid,
+                                    lo = bound.lo,
+                                    hi = bound.hi,
                                     depth = bound.depth,
                                     nodes = bound.nodes
                                 )
@@ -283,16 +288,20 @@ fun BoardAnalysisPanel(
  * Draw a three-line analysis overlay inside a legal-move cell.
  *
  * ┌──────────────┐
- * │    +4.0      │  Line 1 — stone diff (bold, accent color, cell*0.26f)
- * │    D:23       │  Line 2 — depth confidence (normal, dim, cell*0.14f)
- * │   175M        │  Line 3 — node count (normal, dim, cell*0.14f)
+ * │     +4       │  Line 1 — stone diff (bold, accent color, cell*0.26f)
+ * │    D:23      │  Line 2 — depth confidence (normal, dim, cell*0.14f)
+ * │   175M       │  Line 3 — node count (normal, dim, cell*0.14f)
  * └──────────────┘
+ *
+ * @param lo  lower bound of the per-move score (lo==hi means exact)
+ * @param hi  upper bound of the per-move score
  */
 private fun DrawScope.drawScoreMatrix(
     pal: BoardColors,
     cell: Float,
     cx: Float, cy: Float,
-    scoreMid: Int,
+    lo: Int,
+    hi: Int,
     depth: Int,
     nodes: Long
 ) {
@@ -304,7 +313,7 @@ private fun DrawScope.drawScoreMatrix(
             textAlign = android.graphics.Paint.Align.CENTER
             isFakeBoldText = true
         }
-        canvas.drawText(formatStoneDiff(scoreMid), cx, cy - cell * 0.16f, scorePaint)
+        canvas.drawText(formatStoneDiff(lo, hi), cx, cy - cell * 0.16f, scorePaint)
 
         // Line 2: depth / confidence level (small, dim)
         val depthPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
@@ -389,10 +398,23 @@ private fun ThermalStatusBar(
 //  Coordinate helpers
 // ─────────────────────────────────────────────────────────────────
 
+/**
+ * Convert a screen index (0-63, row-major: top-left → bottom-right)
+ * into standard Othello algebraic notation.
+ *
+ * Screen layout (Othello convention: rank 1 = top, rank 8 = bottom):
+ *   a1  b1  c1  d1  e1  f1  g1  h1    ← top row
+ *   a2  b2  c2  d2  e2  f2  g2  h2
+ *   ...
+ *   a8  b8  c8  d8  e8  f8  g8  h8    ← bottom row
+ *
+ * @param si  screen index (0 = top-left, 63 = bottom-right)
+ * @return algebraic coordinate like "f5"
+ */
 private fun screenIdxToMove(si: Int): String {
-    val row = si / 8
-    val col = si % 8
-    return "${('a' + row)}${('1' + col)}"
+    val row = si / 8   // 0=top → 7=bottom
+    val col = si % 8   // 0=left → 7=right
+    return "${('a' + col)}${('1' + row)}"
 }
 
 @Suppress("unused")
@@ -401,4 +423,12 @@ private fun moveToEdaxIdx(move: String): Int {
     return (move[1] - '1') * 8 + (move[0] - 'a')
 }
 
-fun EvalUpdate.stoneDiff(): Double = score / 100.0
+/** Convert engine score (discs) to a display string. */
+fun EvalUpdate.stoneDiff(): String {
+    val s = score
+    return when {
+        s > 0  -> "+$s"
+        s < 0  -> "$s"
+        else   -> "±0"
+    }
+}

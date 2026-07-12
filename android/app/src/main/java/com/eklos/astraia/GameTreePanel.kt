@@ -122,15 +122,15 @@ fun GameTreePanel(
 
                         Spacer(Modifier.weight(1f))
 
-                        // Score (if available)
+                        // Score (if available) — Edax scores are in discs, not centi-discs
                         if (node.score != null) {
-                            val stoneDiff = node.score / 100.0
-                            val scoreText = if (stoneDiff >= 0) "+%.1f".format(stoneDiff)
-                                            else "%.1f".format(stoneDiff)
+                            val discs = node.score
+                            val scoreText = if (discs >= 0) "+$discs"
+                                            else "$discs"
                             Text(
                                 text = scoreText,
                                 fontSize = 12.sp,
-                                color = if (stoneDiff >= 0) Color(0xFF2a8a5e) else Color(0xFFc04040)
+                                color = if (discs >= 0) Color(0xFF2a8a5e) else Color(0xFFc04040)
                             )
                         }
                     }
