@@ -76,8 +76,20 @@ JNIEXPORT jstring JNICALL Java_com_eklos_astraia_EdaxEngine_nativeHint(
         for (int i = 0; i < n_moves && i < count; ++i) {
             Search s; search_init(&s); search_set_board(&s, &board, player);
             search_set_level(&s, level, s.n_empties);
-            s.movelist.move[0].x = move_indices[i];
-            board_get_move(&board, move_indices[i], &s.movelist.move[0]);
+
+            /* Replace full movelist with a single-move movelist so the
+             * search evaluates ONLY this move and returns its individual
+             * score — not the global best-move score.
+             *
+             * The movelist uses move[0] as a sentinel; actual moves start
+             * at move[1].  We unlink the original list and insert a single
+             * move node. */
+            s.movelist.n_moves = 1;
+            s.movelist.move[0].next = &s.movelist.move[1];
+            s.movelist.move[1].x = move_indices[i];
+            board_get_move(&board, move_indices[i], &s.movelist.move[1]);
+            s.movelist.move[1].next = NULL;
+
             search_run(&s);
             char move_str[5], pv_str[256];
             square_to_coord(s.result->move, move_str);

@@ -123,7 +123,7 @@ fun BoardAnalysisPanel(
         )
     }
 
-    BoxWithConstraints(modifier = modifier.fillMaxWidth().aspectRatio(1f)) {
+    BoxWithConstraints(modifier = modifier.fillMaxWidth().aspectRatio(1f).padding(top = 4.dp)) {
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
@@ -244,7 +244,7 @@ fun BoardAnalysisPanel(
                 }
             }
 
-            // ── Coordinate axes (1-8 top, a-h left) ──────
+            // ── Coordinate axes (X-axis: a-h left-to-right, Y-axis: 1-8 top-to-bottom) ──────
             drawContext.canvas.nativeCanvas.let { canvas ->
                 val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
                     color = if (isLightTheme) 0x88000000.toInt() else 0x55ffffff.toInt()
@@ -253,14 +253,16 @@ fun BoardAnalysisPanel(
                     typeface = android.graphics.Typeface.MONOSPACE
                 }
                 for (i in 0 until 8) {
+                    // X-axis (horizontal, below board): a b c d e f g h
                     canvas.drawText(
-                        (i + 1).toString(),
+                        ('a' + i).toString(),
                         bx + i * cell + cell * 0.5f,
                         by + boardSide + axisW * 0.64f,
                         textPaint
                     )
+                    // Y-axis (vertical, left of board): 1 2 3 4 5 6 7 8
                     canvas.drawText(
-                        ('a' + i).toString(),
+                        (i + 1).toString(),
                         bx - axisH * 0.64f,
                         by + i * cell + cell * 0.60f,
                         textPaint

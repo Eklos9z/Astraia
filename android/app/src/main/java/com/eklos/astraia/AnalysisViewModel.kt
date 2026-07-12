@@ -3,6 +3,7 @@ package com.eklos.astraia
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -74,9 +75,16 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         }
 
         // Pipe push-based per-move bounds (NO MORE POLLING).
+        // Only accept bounds from the continuous search when they provide
+        // truly distinct per-move scores (more than one unique lo/hi value),
+        // otherwise keep any existing per-move hint data.
         viewModelScope.launch {
             EdaxContinuousBridge.boundsFlow.collect { bounds ->
-                _uiState.update { it.copy(moveBounds = bounds) }
+                val uniqueScores = bounds.map { it.lo }.distinct().size
+                val hasExisting = _uiState.value.moveBounds.isNotEmpty()
+                if (uniqueScores > 1 || !hasExisting) {
+                    _uiState.update { it.copy(moveBounds = bounds) }
+                }
             }
         }
 
@@ -136,6 +144,36 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         if (!started) {
             _uiState.update { it.copy(isThinking = false, engineStatusText = "Engine unavailable") }
         }
+
+        // ── Per-move evaluation via hint ──────────────────────────
+        // Run independent per-move searches at moderate depth so each
+        // legal cell displays its own distinct evaluation, not a
+        // shared global best score.
+        if (legalMoves.isNotEmpty() && !legalMoves.contains("pass")) {
+            viewModelScope.launch(Dispatchers.Default) {
+                try {
+                    val hintLevel = minOf(level, 12)  // cap for responsiveness
+                    val hints = EdaxEngine.hint(board, hintLevel, legalMoves.size)
+                    if (hints.isNotEmpty()) {
+                        val bounds = hints.map { hint ->
+                            MoveBound(
+                                move = hint.move,
+                                lo = hint.score,
+                                hi = hint.score,
+                                depth = hint.depth,
+                                nodes = 0L
+                            )
+                        }
+                        // Only apply if the board hasn't changed while we computed
+                        if (_uiState.value.boardString == board) {
+                            _uiState.update { it.copy(moveBounds = bounds) }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // hint is best-effort; continuous search bounds may arrive later
+                }
+            }
+        }
     }
 
     /** Stop analysis gracefully. */
@@ -156,7 +194,13 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
 
     // ── Public API: Game State ──────────────────────────────────
 
-    /** Play a move on the current board. Returns the new board string or null on failure. */
+    /**
+     * Play a move on the current board. Returns the new board string or null on failure.
+     *
+     * If after playing the move, the opponent has no legal moves but the current
+     * player does, a "pass" move is automatically triggered so the game continues
+     * rather than ending prematurely.
+     */
     fun playMove(move: String): String? {
         val currentBoard = _uiState.value.boardString
         if (currentBoard.length != 66) return null
@@ -184,6 +228,14 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         )}
 
         startAnalysis(nextBoard, legalMoves = legalMoves)
+
+        // ── Othello pass rule ─────────────────────────────────────
+        // If the NEXT player has no legal moves but the game is not over
+        // (i.e. the current player CAN move), auto-trigger a pass.
+        if (legalMoves.size == 1 && legalMoves.contains("pass")) {
+            return playMove("pass")
+        }
+
         return nextBoard
     }
 
@@ -228,6 +280,12 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         )}
 
         startAnalysis(targetBoard, legalMoves = legalMoves)
+
+        // Auto-pass if the new player has no legal moves
+        if (legalMoves.size == 1 && legalMoves.contains("pass")) {
+            playMove("pass")
+        }
+
         return true
     }
 
@@ -255,6 +313,12 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         )}
 
         startAnalysis(prevBoard, legalMoves = legalMoves)
+
+        // Auto-pass if the new player has no legal moves
+        if (legalMoves.size == 1 && legalMoves.contains("pass")) {
+            playMove("pass")
+        }
+
         return true
     }
 

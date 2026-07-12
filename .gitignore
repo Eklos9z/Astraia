@@ -3,7 +3,7 @@
 bin/
 data/
 doc/
-
+CLAUDE.md
 *.7z
 # 忽略安卓堆转储文件
 *.hprof
