@@ -69,14 +69,16 @@ static int      g_last_emit_score  = 0;
 #define OBSERVER_THROTTLE_MS 200
 
 /* ── Asymmetric search allocation ──────────────────────────────────
- * At each depth iteration, moves whose score lags behind the PV move
- * by more than DISCARD_THRESHOLD discs are pruned from the movelist.
- * This frees YBWC worker threads to focus on the remaining candidates.
+ * Two-tier pruning:
+ *   Tier 1 (quality):  moves > DISCARD_THRESHOLD discs behind PV are pruned.
+ *   Tier 2 (quantity): if g_max_parallel_moves > 0, at most that many
+ *                      moves survive (ranked by score, PV is #1).
+ *
+ * Setting g_max_parallel_moves = 0 disables the quantity tier (unlimited).
  */
 #define DISCARD_THRESHOLD 10
-
-/* Track already-discarded squares so we only emit the notification once. */
-static bool g_discarded_squares[64];  /* indexed by Edax square 0-63 */
+static int  g_max_parallel_moves = 0;   /* 0 = unlimited; N = keep top N */
+static bool g_discarded_squares[64];    /* already-emitted discard notifications */
 
 /**
  * Remove a square from the search's movelist by unlinking it.
@@ -234,19 +236,35 @@ static void cont_observer(Result *result)
             }
         }
 
-        /* ── 2. Asymmetric pruning: discard hopeless moves ───── */
-        if (result->depth >= 8    /* only after some depth, to let scores stabilise */
+        /* ── 2. Asymmetric pruning: discard hopeless / excess moves ─ */
+        if (result->depth >= 8    /* let scores stabilise at shallow depths */
             && !movelist_is_empty(&active_search->movelist)) {
 
             const Move *move;
+            int position = 0;  /* 1-based rank in sorted movelist (PV = #1) */
             foreach_move(move, &active_search->movelist) {
                 if (move->x < A1 || move->x > H8) continue;
-                if (move->x == pv_x) continue;             /* never discard the PV */
+                ++position;
 
+                if (move->x == pv_x) continue;  /* never discard the PV */
+
+                bool should_discard = false;
+                const char *reason = "";
+
+                /* Tier 1 — quality filter: hopelessly behind PV */
                 int diff = pv_score - move->score;
-                if (diff <= DISCARD_THRESHOLD) continue;   /* close enough — keep */
+                if (diff > DISCARD_THRESHOLD) {
+                    should_discard = true;
+                    reason = "quality";
+                }
+                /* Tier 2 — quantity filter: exceeds user's max-parallel limit */
+                if (!should_discard && g_max_parallel_moves > 0 && position > g_max_parallel_moves) {
+                    should_discard = true;
+                    reason = "quantity";
+                }
 
-                if (g_discarded_squares[move->x]) continue; /* already handled */
+                if (!should_discard) continue;
+                if (g_discarded_squares[move->x]) continue; /* already emitted */
 
                 /* Mark & emit the discard notification exactly once. */
                 g_discarded_squares[move->x] = true;
@@ -257,13 +275,13 @@ static void cont_observer(Result *result)
                 char discard_json[256];
                 int dw = snprintf(discard_json, sizeof discard_json,
                     "{\"type\":\"bounds\",\"d\":%d,\"n\":%" PRIu64 ",\"moves\":["
-                    "{\"x\":\"%s\",\"lo\":%d,\"hi\":%d,\"discard\":true}]}",
-                    result->depth, result->n_nodes, coord, move->score, move->score);
+                    "{\"x\":\"%s\",\"lo\":%d,\"hi\":%d,\"discard\":true,\"reason\":\"%s\"}]}",
+                    result->depth, result->n_nodes, coord, move->score, move->score, reason);
                 if (dw > 0 && (size_t)dw < sizeof discard_json) {
                     char pv_coord[5];
                     square_to_coord(pv_x, pv_coord);
-                    CONT_LOGD("cont_observer: discarding %s (score=%d, pv=%s=%d, diff=%d)",
-                              coord, move->score, pv_coord, pv_score, diff);
+                    CONT_LOGD("cont_observer: discarding %s (score=%d, pos=%d, pv=%s=%d, diff=%d, reason=%s)",
+                              coord, move->score, position, pv_coord, pv_score, diff, reason);
                     jstring jdiscard = (*env)->NewStringUTF(env, discard_json);
                     if (jdiscard != NULL) {
                         (*env)->CallVoidMethod(env, g_callback_instance, g_callback_method, jdiscard);
@@ -271,8 +289,8 @@ static void cont_observer(Result *result)
                     }
                 }
 
-                /* Physically remove from the movelist so YBWC workers
-                 * stop wasting CPU on this move at deeper depths. */
+                /* Physically remove from the movelist — YBWC threads
+                 * immediately stop wasting CPU on this move. */
                 movelist_remove_square(&active_search->movelist, move->x);
             }
         }
@@ -563,6 +581,30 @@ Java_com_eklos_astraia_EdaxContinuousBridge_nativeGetThreadCount(
     (void)env;
     (void)clazz;
     return options.n_task;
+}
+
+/**
+ * Set the maximum number of parallel root moves the engine will evaluate.
+ *
+ * @param max_moves  0 = unlimited (every legal move gets equal CPU);
+ *                   N = keep only the top-N moves by score (PV is #1).
+ *                   Clamped to [0, 32] (theoretical max legal moves).
+ *
+ * The limit is enforced at the end of each depth iteration inside
+ * cont_observer.  Moves beyond the limit are pruned from the movelist
+ * and emitted to Kotlin with "discard":true.
+ */
+JNIEXPORT void JNICALL
+Java_com_eklos_astraia_EdaxContinuousBridge_nativeSetMaxParallelMoves(
+    JNIEnv *env, jclass clazz, jint max_moves)
+{
+    (void)env;
+    (void)clazz;
+    if (max_moves < 0) max_moves = 0;
+    if (max_moves > 32) max_moves = 32;
+    g_max_parallel_moves = max_moves;
+    CONT_LOGD("Max parallel moves set to %d (%s)",
+              max_moves, max_moves == 0 ? "unlimited" : "limited");
 }
 
 /**

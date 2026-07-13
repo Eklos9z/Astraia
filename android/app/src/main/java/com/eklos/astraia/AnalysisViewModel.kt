@@ -41,6 +41,7 @@ data class AnalysisUiState(
     val currentNodeIndex: Int = -1,
     val showUmigame: Boolean = false,
     val searchLevel: Int = 15,
+    val parallelCount: Int = 0, // 0 = all (unlimited); 1 = PV only; N = top N
     val statusMessage: String? = null
 )
 
@@ -282,6 +283,21 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
                 startAnalysis(board, level = clamped, legalMoves = _uiState.value.legalMoves)
             }
         }
+    }
+
+    /**
+     * Set how many top moves the engine evaluates in parallel.
+     *
+     * @param count  0 = unlimited (all legal moves get equal CPU);
+     *               1 = only the PV/best move;
+     *               N = keep the top N moves.
+     *
+     * Takes effect immediately on the running search (no restart needed).
+     */
+    fun setParallelCount(count: Int) {
+        val clamped = count.coerceIn(0, 32)
+        _uiState.update { it.copy(parallelCount = clamped) }
+        EdaxContinuousBridge.setMaxParallelMoves(clamped)
     }
 
     // ── Public API: Game State ──────────────────────────────────

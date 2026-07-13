@@ -36,12 +36,14 @@ fun AnalysisSidebar(
     currentNodeIndex: Int,
     showUmigame: Boolean,
     searchLevel: Int,
+    parallelCount: Int,
     isLightTheme: Boolean,
     onKifuImport: (String) -> Int,
     onExportKifu: () -> String,
     onJumpToState: (Int) -> Unit,
     onToggleUmigame: (Boolean) -> Unit,
     onSearchLevelChanged: (Int) -> Unit,
+    onParallelCountChanged: (Int) -> Unit,
     onToggleTheme: () -> Unit,
     onUndo: () -> Unit,
     onNewGame: () -> Unit,
@@ -194,6 +196,71 @@ fun AnalysisSidebar(
                     Text("30", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("45", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("60", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+
+        // ── Section 5b: Parallel Moves (Asymmetric Compute) ─
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Parallel Eval (并行评估数)",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp
+                    )
+                    Text(
+                        if (parallelCount == 0) "All" else "$parallelCount",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = parallelCount.toFloat(),
+                    onValueChange = { onParallelCountChanged(it.toInt()) },
+                    valueRange = 0f..20f,
+                    steps = 19,  // 20 intervals → stops at 0,1,2,…,20
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("All", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("1", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("5", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("10", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("20", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (parallelCount == 0) {
+                    Text(
+                        "Every legal move gets equal CPU time.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                } else {
+                    Text(
+                        "Only the top $parallelCount moves (by score) are kept; the rest are pruned, " +
+                        "freeing YBWC threads for deeper analysis of the best candidates.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
                 }
             }
         }

@@ -80,6 +80,7 @@ object EdaxContinuousBridge {
     @JvmStatic private external fun nativeGetMoveBounds(): String
     @JvmStatic private external fun nativeIsSearchRunning(): Boolean
     @JvmStatic private external fun nativeRequestSnapshot()
+    @JvmStatic private external fun nativeSetMaxParallelMoves(maxMoves: Int)
 
     // ── Internal state ──────────────────────────────────────────
 
@@ -235,6 +236,20 @@ object EdaxContinuousBridge {
     /** Return the current engine thread count. */
     val threadCount: Int
         get() = nativeGetThreadCount()
+
+    /**
+     * Set how many top moves the engine keeps evaluating at depth.
+     *
+     * @param maxMoves  0 = unlimited (every legal move gets equal CPU);
+     *                  1 = only the PV/best move;
+     *                  N = keep the top N moves (by score), prune the rest.
+     *
+     * Excess moves are pruned at the end of each depth iteration and
+     * emitted to the UI with `discard = true`.
+     */
+    fun setMaxParallelMoves(maxMoves: Int) {
+        nativeSetMaxParallelMoves(maxMoves)
+    }
 
     /**
      * Get the per-move evaluation bounds from the live search.
