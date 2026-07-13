@@ -67,6 +67,32 @@ static int64_t  g_last_emit_time_ms = 0;
 static int      g_last_emit_depth  = -1;
 static int      g_last_emit_score  = 0;
 #define OBSERVER_THROTTLE_MS 200
+
+/* ── Asymmetric search allocation ──────────────────────────────────
+ * At each depth iteration, moves whose score lags behind the PV move
+ * by more than DISCARD_THRESHOLD discs are pruned from the movelist.
+ * This frees YBWC worker threads to focus on the remaining candidates.
+ */
+#define DISCARD_THRESHOLD 10
+
+/* Track already-discarded squares so we only emit the notification once. */
+static bool g_discarded_squares[64];  /* indexed by Edax square 0-63 */
+
+/**
+ * Remove a square from the search's movelist by unlinking it.
+ * Safe to call from the master search thread between depth iterations.
+ */
+static void movelist_remove_square(MoveList *ml, int square) {
+    Move *prev = &ml->move[0];  /* sentinel at index 0 */
+    while (prev->next != NULL) {
+        if (prev->next->x == square) {
+            prev->next = prev->next->next;  /* unlink */
+            --ml->n_moves;
+            return;
+        }
+        prev = prev->next;
+    }
+}
 extern void square_to_coord(int, char*);
 extern bool parse_board_text(const char*, Board*, int*, char*, size_t);
 
@@ -183,16 +209,14 @@ static void cont_observer(Result *result)
      */
     Search *active_search = (Search *)atomic_load(&g_active_search_ptr);
     if (active_search != NULL && active_search->result != NULL) {
+
+        /* ── 1. Emit PV move with exact deep score ──────────── */
         int pv_x = active_search->result->move;
+        int pv_score = active_search->result->score;
         if (pv_x >= A1 && pv_x <= H8) {
             char coord[5];
             square_to_coord(pv_x, coord);
-
-            /* Only the PV (best) move has an exact score from a full-window
-             * search.  Non-PV moves that fail-low only return the alpha
-             * bound — emitting them as "exact" scores would overwrite the
-             * accurate per-move evaluations from nativeHint. */
-            int score = active_search->result->score;
+            int score = pv_score;
             if (score < SCORE_MIN) score = SCORE_MIN;
             if (score > SCORE_MAX) score = SCORE_MAX;
 
@@ -207,6 +231,49 @@ static void cont_observer(Result *result)
                     (*env)->CallVoidMethod(env, g_callback_instance, g_callback_method, jbounds);
                     (*env)->DeleteLocalRef(env, jbounds);
                 }
+            }
+        }
+
+        /* ── 2. Asymmetric pruning: discard hopeless moves ───── */
+        if (result->depth >= 8    /* only after some depth, to let scores stabilise */
+            && !movelist_is_empty(&active_search->movelist)) {
+
+            const Move *move;
+            foreach_move(move, &active_search->movelist) {
+                if (move->x < A1 || move->x > H8) continue;
+                if (move->x == pv_x) continue;             /* never discard the PV */
+
+                int diff = pv_score - move->score;
+                if (diff <= DISCARD_THRESHOLD) continue;   /* close enough — keep */
+
+                if (g_discarded_squares[move->x]) continue; /* already handled */
+
+                /* Mark & emit the discard notification exactly once. */
+                g_discarded_squares[move->x] = true;
+
+                char coord[5];
+                square_to_coord(move->x, coord);
+
+                char discard_json[256];
+                int dw = snprintf(discard_json, sizeof discard_json,
+                    "{\"type\":\"bounds\",\"d\":%d,\"n\":%" PRIu64 ",\"moves\":["
+                    "{\"x\":\"%s\",\"lo\":%d,\"hi\":%d,\"discard\":true}]}",
+                    result->depth, result->n_nodes, coord, move->score, move->score);
+                if (dw > 0 && (size_t)dw < sizeof discard_json) {
+                    char pv_coord[5];
+                    square_to_coord(pv_x, pv_coord);
+                    CONT_LOGD("cont_observer: discarding %s (score=%d, pv=%s=%d, diff=%d)",
+                              coord, move->score, pv_coord, pv_score, diff);
+                    jstring jdiscard = (*env)->NewStringUTF(env, discard_json);
+                    if (jdiscard != NULL) {
+                        (*env)->CallVoidMethod(env, g_callback_instance, g_callback_method, jdiscard);
+                        (*env)->DeleteLocalRef(env, jdiscard);
+                    }
+                }
+
+                /* Physically remove from the movelist so YBWC workers
+                 * stop wasting CPU on this move at deeper depths. */
+                movelist_remove_square(&active_search->movelist, move->x);
             }
         }
     }
@@ -405,10 +472,11 @@ Java_com_eklos_astraia_EdaxContinuousBridge_nativeStartContinuousSearch(
 
     (*env)->ReleaseStringUTFChars(env, board_text, text);
 
-    /* Reset observer throttle for the new search. */
+    /* Reset observer throttle & discard tracking for the new search. */
     g_last_emit_time_ms = 0;
     g_last_emit_depth  = -1;
     g_last_emit_score  = 0;
+    memset(g_discarded_squares, 0, sizeof(g_discarded_squares));
 
     /* Enable the observer callback. */
     atomic_store(&g_observer_active, true);

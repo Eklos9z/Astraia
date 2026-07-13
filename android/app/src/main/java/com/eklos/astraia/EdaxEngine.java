@@ -134,6 +134,7 @@ public final class EdaxEngine {
                             m.getString("move"),
                             m.getInt("score"),
                             m.getInt("depth"),
+                            m.optLong("nodes", 0L),
                             m.optString("pv", "")
                         ));
                     }
@@ -197,12 +198,14 @@ public final class EdaxEngine {
         public final String move;
         public final int score;
         public final int depth;
+        public final long nodes;
         public final String pv;
 
-        HintMove(String move, int score, int depth, String pv) {
+        HintMove(String move, int score, int depth, long nodes, String pv) {
             this.move = move;
             this.score = score;
             this.depth = depth;
+            this.nodes = nodes;
             this.pv = pv;
         }
     }

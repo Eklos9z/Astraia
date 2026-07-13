@@ -94,29 +94,36 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
             EdaxContinuousBridge.boundsFlow.collect { bounds ->
                 if (!_uiState.value.isThinking) return@collect
 
-                // ── PV-aware merge (non-destructive) ─────────────
-                // The observer now only emits the single PV (best) move with
-                // its exact deep-search score.  Non-PV moves from hint keep
-                // their accurate moderate-depth evaluations.  We MERGE the
-                // PV update into the existing map rather than replacing it.
+                // ── PV-aware merge + asymmetric discard ─────────
+                // 1. PV moves: update score/nodes with exact deep-search data.
+                // 2. Discard moves: remove from display (hopelessly behind PV).
+                // 3. Non-PV moves: keep existing hint evaluations untouched.
                 val existing = _uiState.value.moveBounds.associateBy { it.move }.toMutableMap()
-                var pvUpdated = false
+                var changed = false
                 for (b in bounds) {
-                    if (b.isPv) {
+                    if (b.discard) {
+                        // Engine pruned this move — remove from the UI.
+                        if (existing.remove(b.move) != null) {
+                            changed = true
+                            Log.d("EdaxRawOutput", "[bounds] discard removed: ${b.move} (too far behind PV)")
+                        }
+                    } else if (b.isPv) {
                         val old = existing[b.move]
-                        if (old == null || old.depth < b.depth || old.lo != b.lo) {
+                        if (old == null || old.depth < b.depth || old.lo != b.lo || old.nodes != b.nodes) {
                             existing[b.move] = b
-                            pvUpdated = true
+                            changed = true
                         }
                     } else if (b.move !in existing) {
-                        // Non-PV from observer: only accept if we have NO data at all
-                        // for this move (shouldn't normally happen after hint runs)
                         existing[b.move] = b
                     }
                 }
-                if (pvUpdated || _uiState.value.moveBounds.isEmpty()) {
+                if (changed || _uiState.value.moveBounds.isEmpty()) {
                     val merged = existing.values.toList()
                     val pvSample = bounds.filter { it.isPv }.joinToString(", ") { "${it.move}=${it.lo}@D${it.depth}" }
+                    val discSample = bounds.filter { it.discard }.joinToString(", ") { it.move }
+                    if (discSample.isNotEmpty()) {
+                        Log.d("EdaxRawOutput", "[bounds] discard: [$discSample] — total kept: ${merged.size}")
+                    }
                     Log.d("EdaxRawOutput", "[bounds] PV-merge: total ${merged.size} moves, updated PV: [$pvSample]")
                     _uiState.update { it.copy(moveBounds = merged) }
                 }
@@ -228,7 +235,7 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
                                 lo = hint.score,
                                 hi = hint.score,
                                 depth = hint.depth,
-                                nodes = 0L
+                                nodes = hint.nodes
                             )
                         }
                         _uiState.update { it.copy(moveBounds = bounds) }

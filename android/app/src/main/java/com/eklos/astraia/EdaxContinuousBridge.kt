@@ -38,8 +38,9 @@ data class MoveBound(
     val hi: Int,
     val depth: Int = 0,      // global depth at time of emission
     val nodes: Long = 0L,    // global nodes at time of emission
-    val isPv: Boolean = false // true if this is the PV (best) move with exact score;
-                              // non-PV moves only have alpha-bounds (fail-low values)
+    val isPv: Boolean = false, // true if this is the PV (best) move with exact score
+    val discard: Boolean = false // true if this move is >10 discs behind PV;
+                                 // Kotlin merge removes it from the display
 )
 
 /**
@@ -307,12 +308,13 @@ object EdaxContinuousBridge {
                         val bounds = (0 until arr.length()).map { i ->
                             val m = arr.getJSONObject(i)
                             MoveBound(
-                                move  = m.getString("x"),
-                                lo    = m.optInt("lo", Int.MIN_VALUE),
-                                hi    = m.optInt("hi", Int.MIN_VALUE),
-                                depth = depth,
-                                nodes = nodes,
-                                isPv  = m.optBoolean("pv", false)
+                                move    = m.getString("x"),
+                                lo      = m.optInt("lo", Int.MIN_VALUE),
+                                hi      = m.optInt("hi", Int.MIN_VALUE),
+                                depth   = depth,
+                                nodes   = nodes,
+                                isPv    = m.optBoolean("pv", false),
+                                discard = m.optBoolean("discard", false)
                             )
                         }
                         Log.d("EdaxRawOutput", "[observer] parsed ${bounds.size} PV bounds at depth=$depth " +

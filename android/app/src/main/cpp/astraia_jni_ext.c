@@ -107,8 +107,9 @@ JNIEXPORT jstring JNICALL Java_com_eklos_astraia_EdaxEngine_nativeHint(
             build_pv_string(&s.result->pv, pv_str, sizeof pv_str);
             char escaped_pv[512]; json_escape_ext(pv_str, escaped_pv, sizeof escaped_pv);
             int written = snprintf(moves_json + mj_used, sizeof moves_json - mj_used,
-                "%s{\"move\":\"%s\",\"score\":%d,\"depth\":%d,\"pv\":\"%s\"}",
-                i ? "," : "", move_str, s.result->score, s.result->depth, escaped_pv);
+                "%s{\"move\":\"%s\",\"score\":%d,\"depth\":%d,\"nodes\":%" PRIu64 ",\"pv\":\"%s\"}",
+                i ? "," : "", move_str, s.result->score, s.result->depth,
+                s.result->n_nodes, escaped_pv);
             if (written < 0 || (size_t)written >= sizeof moves_json - mj_used) {
                 LOGW("nativeHint: buffer overflow at move %d/%d (used=%zu, max=%zu) — dropping remaining moves",
                      i, n_moves, mj_used, sizeof moves_json);
