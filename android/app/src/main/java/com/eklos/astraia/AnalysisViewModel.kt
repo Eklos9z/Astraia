@@ -1,11 +1,15 @@
 package com.eklos.astraia
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Aggregate state pushed to the Compose UI on every engine update.
@@ -21,6 +25,7 @@ import kotlinx.coroutines.launch
  * @property gameNodes      move history for the game tree panel
  * @property currentNodeIndex  position in move history
  * @property showUmigame    whether Umigame number overlay is active
+ * @property searchLevel    current AI search depth (1-60)
  * @property statusMessage  transient snackbar / toast message
  */
 data class AnalysisUiState(
@@ -35,6 +40,7 @@ data class AnalysisUiState(
     val gameNodes: List<GameNode> = emptyList(),
     val currentNodeIndex: Int = -1,
     val showUmigame: Boolean = false,
+    val searchLevel: Int = 15,
     val statusMessage: String? = null
 )
 
@@ -62,6 +68,12 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
     private val _uiState = MutableStateFlow(AnalysisUiState())
     val uiState: StateFlow<AnalysisUiState> = _uiState.asStateFlow()
 
+    // ── Search coordination ─────────────────────────────────────
+    /** Monotonic generation counter so stale results are discarded. */
+    private val searchGeneration = AtomicInteger(0)
+    /** Debounce job for search-level slider changes. */
+    private var searchLevelJob: Job? = null
+
     init {
         // One-time initialisation of the native bridge.
         EdaxContinuousBridge.init()
@@ -80,10 +92,33 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         // otherwise keep any existing per-move hint data.
         viewModelScope.launch {
             EdaxContinuousBridge.boundsFlow.collect { bounds ->
-                val uniqueScores = bounds.map { it.lo }.distinct().size
-                val hasExisting = _uiState.value.moveBounds.isNotEmpty()
-                if (uniqueScores > 1 || !hasExisting) {
-                    _uiState.update { it.copy(moveBounds = bounds) }
+                if (!_uiState.value.isThinking) return@collect
+
+                // ── PV-aware merge (non-destructive) ─────────────
+                // The observer now only emits the single PV (best) move with
+                // its exact deep-search score.  Non-PV moves from hint keep
+                // their accurate moderate-depth evaluations.  We MERGE the
+                // PV update into the existing map rather than replacing it.
+                val existing = _uiState.value.moveBounds.associateBy { it.move }.toMutableMap()
+                var pvUpdated = false
+                for (b in bounds) {
+                    if (b.isPv) {
+                        val old = existing[b.move]
+                        if (old == null || old.depth < b.depth || old.lo != b.lo) {
+                            existing[b.move] = b
+                            pvUpdated = true
+                        }
+                    } else if (b.move !in existing) {
+                        // Non-PV from observer: only accept if we have NO data at all
+                        // for this move (shouldn't normally happen after hint runs)
+                        existing[b.move] = b
+                    }
+                }
+                if (pvUpdated || _uiState.value.moveBounds.isEmpty()) {
+                    val merged = existing.values.toList()
+                    val pvSample = bounds.filter { it.isPv }.joinToString(", ") { "${it.move}=${it.lo}@D${it.depth}" }
+                    Log.d("EdaxRawOutput", "[bounds] PV-merge: total ${merged.size} moves, updated PV: [$pvSample]")
+                    _uiState.update { it.copy(moveBounds = merged) }
                 }
             }
         }
@@ -131,6 +166,8 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
     fun startAnalysis(board: String, level: Int = 15, legalMoves: Set<String> = emptySet()) {
         stopAnalysis()
 
+        val gen = searchGeneration.incrementAndGet()
+
         _uiState.update { it.copy(
             boardString = board,
             legalMoves = legalMoves,
@@ -145,6 +182,15 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
             _uiState.update { it.copy(isThinking = false, engineStatusText = "Engine unavailable") }
         }
 
+        // ── Sign convention log ──────────────────────────────
+        // Edax scores are always from the perspective of the SIDE TO MOVE.
+        // Positive = advantage for current player, Negative = disadvantage.
+        // The UI displays this directly: "+4" means "current player ahead by 4 discs",
+        // "−4" means "current player behind by 4 discs".
+        val sideChar = if (board.length >= 66) board[65] else '?'
+        val sideName = when (sideChar) { 'X' -> "Black" ; 'O' -> "White" ; else -> "?" }
+        Log.d("EdaxRawOutput", "[sign] board=${board.take(65)}... side=$sideName — scores are $sideName's perspective (+ good, − bad)")
+
         // ── Per-move evaluation via hint ──────────────────────────
         // Run independent per-move searches at moderate depth so each
         // legal cell displays its own distinct evaluation, not a
@@ -152,9 +198,30 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         if (legalMoves.isNotEmpty() && !legalMoves.contains("pass")) {
             viewModelScope.launch(Dispatchers.Default) {
                 try {
-                    val hintLevel = minOf(level, 12)  // cap for responsiveness
+                    val hintLevel = minOf(level, 20)  // moderate cap for quick initial feedback;
+                                                     // the continuous search observer now provides
+                                                     // progressively deeper per-move bounds at every
+                                                     // depth iteration (via force_observer flag)
                     val hints = EdaxEngine.hint(board, hintLevel, legalMoves.size)
+                    Log.d("EdaxRawOutput", "[hint] requested ${legalMoves.size} moves at level $hintLevel, got ${hints.size} results")
+                    if (hints.size < legalMoves.size) {
+                        Log.w("EdaxRawOutput", "[hint] MISSING: ${legalMoves.size - hints.size} legal moves have no evaluation!")
+                        val evalMoves = hints.map { it.move }.toSet()
+                        val missing = legalMoves.filter { it !in evalMoves && it != "pass" }
+                        if (missing.isNotEmpty()) {
+                            Log.w("EdaxRawOutput", "[hint] unevaluated moves: $missing")
+                        }
+                    }
+                    // Coordinate trace: log first few evaluations for verification
                     if (hints.isNotEmpty()) {
+                        val sample = hints.take(5).joinToString(", ") { "${it.move}=${it.score}@D${it.depth}" }
+                        val sideChar = if (board.length >= 66) board[65] else '?'
+                        Log.d("EdaxRawOutput", "[hint] sample evals (${board.length} char board, side=$sideChar): [$sample ...]")
+                    }
+                    if (hints.isNotEmpty()
+                        && searchGeneration.get() == gen
+                        && _uiState.value.boardString == board
+                    ) {
                         val bounds = hints.map { hint ->
                             MoveBound(
                                 move = hint.move,
@@ -164,13 +231,10 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
                                 nodes = 0L
                             )
                         }
-                        // Only apply if the board hasn't changed while we computed
-                        if (_uiState.value.boardString == board) {
-                            _uiState.update { it.copy(moveBounds = bounds) }
-                        }
+                        _uiState.update { it.copy(moveBounds = bounds) }
                     }
-                } catch (_: Exception) {
-                    // hint is best-effort; continuous search bounds may arrive later
+                } catch (e: Exception) {
+                    Log.e("EdaxRawOutput", "[hint] exception: ${e.message}", e)
                 }
             }
         }
@@ -192,14 +256,66 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         EdaxContinuousBridge.requestSnapshot()
     }
 
+    /**
+     * Set the AI search level (1–60).
+     *
+     * Updates the state immediately for responsive UI feedback, then
+     * restarts the analysis with a short debounce so rapid slider
+     * dragging doesn't flood the engine with restarts.
+     */
+    fun setSearchLevel(level: Int) {
+        val clamped = level.coerceIn(1, 60)
+        _uiState.update { it.copy(searchLevel = clamped) }
+
+        searchLevelJob?.cancel()
+        searchLevelJob = viewModelScope.launch {
+            delay(300L)  // debounce: wait for the user to finish dragging
+            val board = _uiState.value.boardString
+            if (board.length == 66) {
+                startAnalysis(board, level = clamped, legalMoves = _uiState.value.legalMoves)
+            }
+        }
+    }
+
     // ── Public API: Game State ──────────────────────────────────
 
     /**
-     * Play a move on the current board. Returns the new board string or null on failure.
+     * Resolve any pass that is required at the given board position.
      *
-     * If after playing the move, the opponent has no legal moves but the current
-     * player does, a "pass" move is automatically triggered so the game continues
-     * rather than ending prematurely.
+     * If the next player has no legal moves but the game is not over,
+     * applies a pass move and appends it to the game history.
+     *
+     * @return Pair of (finalBoard, finalLegalMoves)
+     */
+    private fun resolvePass(board: String): Pair<String, Set<String>> {
+        var currentBoard = board
+        var legalMoves = if (!EdaxEngine.isGameOver(currentBoard))
+            EdaxEngine.legalMoves(currentBoard) else emptySet()
+
+        if (legalMoves.size == 1 && legalMoves.contains("pass")) {
+            val passBoard = EdaxEngine.playMove(currentBoard, "pass")
+            if (passBoard != null && passBoard.length == 66) {
+                val passNode = GameNode(
+                    id = ++gameNodeCounter,
+                    board = passBoard,
+                    move = "pass",
+                    score = null
+                )
+                _gameNodes.add(passNode)
+                currentBoard = passBoard
+                legalMoves = if (!EdaxEngine.isGameOver(currentBoard))
+                    EdaxEngine.legalMoves(currentBoard) else emptySet()
+            }
+        }
+        return Pair(currentBoard, legalMoves)
+    }
+
+    /**
+     * Play a move on the current board. Returns the final board string or null on failure.
+     *
+     * Passes are resolved inline (before starting analysis) to avoid the race
+     * condition that occurred when [playMove] recursively called itself,
+     * causing two native search threads to overlap briefly.
      */
     fun playMove(move: String): String? {
         val currentBoard = _uiState.value.boardString
@@ -217,26 +333,23 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         )
         _gameNodes.add(node)
 
-        val legalMoves = if (!EdaxEngine.isGameOver(nextBoard))
-            EdaxEngine.legalMoves(nextBoard) else emptySet()
+        // ── Resolve pass BEFORE starting analysis ────────────────
+        // This avoids the old recursive call which triggered a second
+        // startAnalysis → stopAnalysis → startContinuousSearch in
+        // rapid succession, causing native search threads to race.
+        val (finalBoard, finalLegalMoves) = resolvePass(nextBoard)
 
         _uiState.update { it.copy(
-            boardString = nextBoard,
-            legalMoves = legalMoves,
+            boardString = finalBoard,
+            legalMoves = finalLegalMoves,
             gameNodes = _gameNodes.toList(),
-            currentNodeIndex = node.id
+            currentNodeIndex = _gameNodes.last().id
         )}
 
-        startAnalysis(nextBoard, legalMoves = legalMoves)
+        val level = _uiState.value.searchLevel
+        startAnalysis(finalBoard, level = level, legalMoves = finalLegalMoves)
 
-        // ── Othello pass rule ─────────────────────────────────────
-        // If the NEXT player has no legal moves but the game is not over
-        // (i.e. the current player CAN move), auto-trigger a pass.
-        if (legalMoves.size == 1 && legalMoves.contains("pass")) {
-            return playMove("pass")
-        }
-
-        return nextBoard
+        return finalBoard
     }
 
     /** Play a batch of moves (from kifu import). */
@@ -261,8 +374,6 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
 
         // Rebuild board from history up to this node
         val targetBoard = node.board
-        val legalMoves = if (!EdaxEngine.isGameOver(targetBoard))
-            EdaxEngine.legalMoves(targetBoard) else emptySet()
 
         // Trim history after this node (for now; branching will preserve alternatives)
         val idx = _gameNodes.indexOfFirst { it.id == nodeIndex }
@@ -270,21 +381,20 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
             while (_gameNodes.size > idx + 1) _gameNodes.removeAt(_gameNodes.size - 1)
         }
 
+        // ── Resolve pass BEFORE starting analysis ────────────────
+        val (finalBoard, finalLegalMoves) = resolvePass(targetBoard)
+
         _uiState.update { it.copy(
-            boardString = targetBoard,
-            legalMoves = legalMoves,
+            boardString = finalBoard,
+            legalMoves = finalLegalMoves,
             gameNodes = _gameNodes.toList(),
-            currentNodeIndex = nodeIndex,
+            currentNodeIndex = _gameNodes.lastOrNull()?.id ?: nodeIndex,
             moveBounds = emptyList(),
             latestUpdate = null
         )}
 
-        startAnalysis(targetBoard, legalMoves = legalMoves)
-
-        // Auto-pass if the new player has no legal moves
-        if (legalMoves.size == 1 && legalMoves.contains("pass")) {
-            playMove("pass")
-        }
+        val level = _uiState.value.searchLevel
+        startAnalysis(finalBoard, level = level, legalMoves = finalLegalMoves)
 
         return true
     }
@@ -300,24 +410,20 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
             EdaxEngine.initialBoard()
         }
 
-        val legalMoves = if (!EdaxEngine.isGameOver(prevBoard))
-            EdaxEngine.legalMoves(prevBoard) else emptySet()
+        // ── Resolve pass BEFORE starting analysis ────────────────
+        val (finalBoard, finalLegalMoves) = resolvePass(prevBoard)
 
         _uiState.update { it.copy(
-            boardString = prevBoard,
-            legalMoves = legalMoves,
+            boardString = finalBoard,
+            legalMoves = finalLegalMoves,
             gameNodes = _gameNodes.toList(),
             currentNodeIndex = _gameNodes.lastOrNull()?.id ?: -1,
             moveBounds = emptyList(),
             latestUpdate = null
         )}
 
-        startAnalysis(prevBoard, legalMoves = legalMoves)
-
-        // Auto-pass if the new player has no legal moves
-        if (legalMoves.size == 1 && legalMoves.contains("pass")) {
-            playMove("pass")
-        }
+        val level = _uiState.value.searchLevel
+        startAnalysis(finalBoard, level = level, legalMoves = finalLegalMoves)
 
         return true
     }
@@ -349,6 +455,8 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         val board = EdaxEngine.initialBoard()
         val legalMoves = EdaxEngine.legalMoves(board)
 
+        val level = _uiState.value.searchLevel
+
         _uiState.update { it.copy(
             boardString = board,
             legalMoves = legalMoves,
@@ -360,7 +468,7 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
             statusMessage = "New game"
         )}
 
-        startAnalysis(board, legalMoves = legalMoves)
+        startAnalysis(board, level = level, legalMoves = legalMoves)
     }
 
     /** Export the current game tree as a compact kifu string. */
@@ -377,6 +485,7 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         super.onCleared()
+        searchLevelJob?.cancel()
         stopAnalysis()
         thermalManager.shutdown()
     }

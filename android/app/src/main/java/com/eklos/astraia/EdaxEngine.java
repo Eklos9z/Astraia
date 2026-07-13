@@ -138,8 +138,18 @@ public final class EdaxEngine {
                         ));
                     }
                 }
+                if (result.size() < count) {
+                    android.util.Log.w("EdaxRawOutput", "[hint-java] got " + result.size() +
+                        " hint results but requested " + count + " (level=" + level + ")");
+                }
+            } else {
+                android.util.Log.w("EdaxRawOutput", "[hint-java] nativeHint returned ok=false: " +
+                    json.substring(0, Math.min(200, json.length())));
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            android.util.Log.e("EdaxRawOutput", "[hint-java] JSON parse failed (" +
+                e.getMessage() + "): " + json.substring(0, Math.min(300, json.length())));
+        }
         return result;
     }
 

@@ -233,7 +233,7 @@ void record_best_move(Search *search, const Board *init_board, const Move *bestm
 		mtx_unlock(&search_log.mutex);
 	}
 
-	if (has_changed && options.noise <= depth && search->options.verbosity == 3) search->observer(search->result);
+	if (has_changed && (options.noise <= depth && search->options.verbosity == 3 || search->options.force_observer)) search->observer(search->result);
 }
 
 void show_current_move(FILE *f, Search *search, const Move *move, const int alpha, const int beta, const bool parallel) {
@@ -576,7 +576,7 @@ int aspiration_search(Search *search, int alpha, int beta, const int depth, int 
 
 	search->result->time = search_time(search);
 	search->result->n_nodes = search_count_nodes(search);
-	if (options.noise <= depth && search->options.verbosity >= 2) {
+	if (options.noise <= depth && search->options.verbosity >= 2 || search->options.force_observer) {
 		search->observer(search->result);
 	}
 	log_print(&search_log, "\n");
@@ -773,7 +773,7 @@ void iterative_deepening(Search *search, int alpha, int beta)
 	search->selectivity = tmp_selectivity;
 
 	// display current search status
-	if (options.noise <= start && search->options.verbosity >= 2) {
+	if (options.noise <= start && search->options.verbosity >= 2 || search->options.force_observer) {
 		search->result->time = search_time(search);
 		search->result->n_nodes = search_count_nodes(search);
 		search->observer(search->result);
@@ -875,8 +875,8 @@ int search_run(void *v)
 
 	// finalizations
 	search->result->n_nodes = search_count_nodes(search);
-	if (search->options.verbosity) {
-		if (search->options.verbosity == 1 || options.noise > search->result->depth) search->observer(search->result);
+	if (search->options.verbosity || search->options.force_observer) {
+		if (search->options.verbosity == 1 || search->options.force_observer || options.noise > search->result->depth) search->observer(search->result);
 		if (search->stop == STOP_TIMEOUT) {info("[Search out of time]\n");}
 		else if (search->stop == STOP_ON_DEMAND) {info("[Search stopped on user demand]\n");}
 		else if (search->stop == STOP_PONDERING) {info("[Pondering stopped]\n");}

@@ -5,9 +5,6 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.DarkMode
-import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -21,7 +18,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
  * - Landscape: board (55%) | analysis sidebar (45%)
  * - Portrait:  board (full width) then sidebar below
  */
-@OptIn(ExperimentalMaterial3Api::class)
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,36 +57,15 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(
                 colorScheme = if (isLightTheme) lightColorScheme() else darkColorScheme()
             ) {
+                // Scaffold used only for Snackbar support — no TopAppBar
+                // so the board renders without any top occlusion.
                 Scaffold(
-                    snackbarHost = { SnackbarHost(snackbarHostState) },
-                    topBar = {
-                        TopAppBar(
-                            title = {
-                                Text(
-                                    "Astraia",
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            },
-                            actions = {
-                                // Theme toggle
-                                IconButton(onClick = { isLightTheme = !isLightTheme }) {
-                                    Icon(
-                                        imageVector = if (isLightTheme) Icons.Outlined.DarkMode
-                                                      else Icons.Outlined.LightMode,
-                                        contentDescription = "Toggle theme",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            },
-                            colors = TopAppBarDefaults.topAppBarColors(
-                                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
-                            )
-                        )
-                    }
+                    snackbarHost = { SnackbarHost(snackbarHostState) }
                 ) { paddingValues ->
                     AstraiaMainContent(
                         uiState = uiState,
                         isLightTheme = isLightTheme,
+                        onToggleTheme = { isLightTheme = !isLightTheme },
                         viewModel = viewModel,
                         modifier = Modifier.padding(paddingValues)
                     )
@@ -102,7 +77,7 @@ class MainActivity : ComponentActivity() {
                 if (engineReady && uiState.boardString.isEmpty()) {
                     val board = EdaxEngine.initialBoard()
                     val legalMoves = EdaxEngine.legalMoves(board)
-                    viewModel.startAnalysis(board, level = 15, legalMoves = legalMoves)
+                    viewModel.startAnalysis(board, level = uiState.searchLevel, legalMoves = legalMoves)
                 }
             }
         }
@@ -122,6 +97,7 @@ class MainActivity : ComponentActivity() {
 private fun AstraiaMainContent(
     uiState: AnalysisUiState,
     isLightTheme: Boolean,
+    onToggleTheme: () -> Unit,
     viewModel: AnalysisViewModel,
     modifier: Modifier = Modifier
 ) {
@@ -148,10 +124,14 @@ private fun AstraiaMainContent(
                 gameNodes = uiState.gameNodes,
                 currentNodeIndex = uiState.currentNodeIndex,
                 showUmigame = uiState.showUmigame,
+                searchLevel = uiState.searchLevel,
+                isLightTheme = isLightTheme,
                 onKifuImport = { text -> viewModel.importFromClipboard(text) },
                 onExportKifu = { viewModel.exportKifu() },
                 onJumpToState = { id -> viewModel.jumpToState(id) },
                 onToggleUmigame = { enabled -> viewModel.toggleUmigame(enabled) },
+                onSearchLevelChanged = { level -> viewModel.setSearchLevel(level) },
+                onToggleTheme = onToggleTheme,
                 onUndo = { viewModel.undoMove() },
                 onNewGame = { viewModel.newGame() },
                 modifier = Modifier.weight(0.45f)
@@ -176,10 +156,14 @@ private fun AstraiaMainContent(
                 gameNodes = uiState.gameNodes,
                 currentNodeIndex = uiState.currentNodeIndex,
                 showUmigame = uiState.showUmigame,
+                searchLevel = uiState.searchLevel,
+                isLightTheme = isLightTheme,
                 onKifuImport = { text -> viewModel.importFromClipboard(text) },
                 onExportKifu = { viewModel.exportKifu() },
                 onJumpToState = { id -> viewModel.jumpToState(id) },
                 onToggleUmigame = { enabled -> viewModel.toggleUmigame(enabled) },
+                onSearchLevelChanged = { level -> viewModel.setSearchLevel(level) },
+                onToggleTheme = onToggleTheme,
                 onUndo = { viewModel.undoMove() },
                 onNewGame = { viewModel.newGame() },
                 modifier = Modifier.fillMaxWidth()

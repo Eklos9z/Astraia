@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <android/log.h>
 #include "board.h"
 #include "book.h"
 #include "const.h"
@@ -11,6 +12,10 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+
+#define LOG_TAG "EdaxRawOutput"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 
 /* Forward declarations from astraia_jni.c */
 extern pthread_mutex_t engine_mutex;
@@ -67,12 +72,18 @@ JNIEXPORT jstring JNICALL Java_com_eklos_astraia_EdaxEngine_nativeHint(
         snprintf(json, sizeof json, "{\"ok\":false,\"error\":\"%s\"}", error);
     } else {
         if (level < 0) level = 0; if (level > 60) level = 60;
-        if (count < 1) count = 1; if (count > 10) count = 10;
+        if (count < 1) count = 1; if (count > 32) count = 32;  /* max legal moves in Othello is ~33 */
         uint64_t moves = board_get_moves(&board);
         int move_indices[60], n_moves = 0;
         for (int x = A1; x <= H8 && n_moves < 60; ++x)
             if (moves & x_to_bit(x)) move_indices[n_moves++] = x;
-        char moves_json[6144]; size_t mj_used = 0; moves_json[0] = 0;
+
+        LOGD("nativeHint: board has %d legal moves, requesting %d evaluations at level %d",
+             n_moves, count, level);
+
+        /* Increase buffer: worst-case ~32 moves × 200 bytes PV ≈ 6400 + framing */
+        char moves_json[16384]; size_t mj_used = 0; moves_json[0] = 0;
+        int emitted = 0;
         for (int i = 0; i < n_moves && i < count; ++i) {
             Search s; search_init(&s); search_set_board(&s, &board, player);
             search_set_level(&s, level, s.n_empties);
@@ -98,10 +109,20 @@ JNIEXPORT jstring JNICALL Java_com_eklos_astraia_EdaxEngine_nativeHint(
             int written = snprintf(moves_json + mj_used, sizeof moves_json - mj_used,
                 "%s{\"move\":\"%s\",\"score\":%d,\"depth\":%d,\"pv\":\"%s\"}",
                 i ? "," : "", move_str, s.result->score, s.result->depth, escaped_pv);
-            if (written < 0 || (size_t)written >= sizeof moves_json - mj_used) break;
+            if (written < 0 || (size_t)written >= sizeof moves_json - mj_used) {
+                LOGW("nativeHint: buffer overflow at move %d/%d (used=%zu, max=%zu) — dropping remaining moves",
+                     i, n_moves, mj_used, sizeof moves_json);
+                break;
+            }
             mj_used += (size_t)written;
+            ++emitted;
             search_free(&s);
         }
+        if (emitted < n_moves) {
+            LOGW("nativeHint: only %d/%d legal moves emitted (count=%d, buffer=%zu/%zu bytes)",
+                 emitted, n_moves, count, mj_used, sizeof moves_json);
+        }
+        LOGD("nativeHint: emitted %d move evaluations (%zu bytes JSON)", emitted, mj_used);
         snprintf(json, sizeof json, "{\"ok\":true,\"moves\":[%s]}", moves_json);
     }
     pthread_mutex_unlock(&engine_mutex);

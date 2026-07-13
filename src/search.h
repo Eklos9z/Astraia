@@ -109,6 +109,7 @@ typedef struct Search {
 		int64_t time;                             /**< time in sec. */
 		bool time_per_move;                       /**< time_per_move or per game ?*/
 		int verbosity;                            /**< verbosity level */
+		bool force_observer;                      /**< always fire observer regardless of noise */
 		bool keep_date;                           /**< keep date */
 		const char *header;                       /**< header for search output */
 		const char *separator;                    /**< separator for search output */

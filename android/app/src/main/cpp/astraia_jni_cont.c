@@ -25,6 +25,7 @@
  */
 
 #include <jni.h>
+#include <android/log.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -33,13 +34,19 @@
 #include <string.h>
 #include <inttypes.h>
 
+#define CONT_LOG_TAG "EdaxRawOutput"
+#define CONT_LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, CONT_LOG_TAG, __VA_ARGS__)
+#define CONT_LOGW(...) __android_log_print(ANDROID_LOG_WARN, CONT_LOG_TAG, __VA_ARGS__)
+
 #include "board.h"
+#include "bit.h"
 #include "const.h"
 #include "eval.h"
 #include "move.h"
 #include "options.h"
 #include "search.h"
 #include "util.h"
+#include <time.h>
 
 /* ------------------------------------------------------------------ */
 /*  Forward declarations from astraia_jni.c                           */
@@ -47,6 +54,19 @@
 extern pthread_mutex_t engine_mutex;
 extern bool eval_ready;
 extern jstring new_string(JNIEnv*, const char*);
+
+/* ── Observer throttling ───────────────────────────────────────────
+ * The observer fires at every depth iteration (1..60), plus during
+ * selectivity loops and aspiration re-searches.  Without throttling,
+ * this can produce 100+ JNI callbacks per second, causing frame drops.
+ *
+ * We throttle to at most one emission per 200ms, or whenever the
+ * depth or best-move score changes materially.
+ */
+static int64_t  g_last_emit_time_ms = 0;
+static int      g_last_emit_depth  = -1;
+static int      g_last_emit_score  = 0;
+#define OBSERVER_THROTTLE_MS 200
 extern void square_to_coord(int, char*);
 extern bool parse_board_text(const char*, Board*, int*, char*, size_t);
 
@@ -85,6 +105,26 @@ typedef struct {
 static void cont_observer(Result *result)
 {
     if (!atomic_load(&g_observer_active)) return;
+
+    /* ── JNI-level throttling ──────────────────────────────────
+     * Skip if neither depth nor score changed AND < 200ms elapsed.
+     * This prevents the selectivity loop from firing dozens of
+     * identical callbacks at the same depth. */
+    bool depth_changed  = (result->depth != g_last_emit_depth);
+    bool score_changed  = (result->score != g_last_emit_score);
+    if (!depth_changed && !score_changed) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t now_ms = now.tv_sec * 1000LL + now.tv_nsec / 1000000LL;
+        if (now_ms - g_last_emit_time_ms < OBSERVER_THROTTLE_MS) {
+            return;  /* throttled: nothing new to report */
+        }
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    g_last_emit_time_ms = now.tv_sec * 1000LL + now.tv_nsec / 1000000LL;
+    g_last_emit_depth  = result->depth;
+    g_last_emit_score  = result->score;
 
     /* Fast bail-out: if the JVM or callback isn't ready, skip. */
     JNIEnv *env = NULL;
@@ -142,41 +182,31 @@ static void cont_observer(Result *result)
      *   {"x":"f5","lo":4,"hi":4,"c":123}, ...]}
      */
     Search *active_search = (Search *)atomic_load(&g_active_search_ptr);
-    if (active_search != NULL && !movelist_is_empty(&active_search->movelist)) {
-        char bounds_json[4096];
-        size_t used = 0;
-        int bw = snprintf(bounds_json, sizeof bounds_json,
-            "{\"type\":\"bounds\",\"d\":%d,\"n\":%" PRIu64 ",\"moves\":[",
-            result->depth, result->n_nodes);
-        if (bw > 0 && (size_t)bw < sizeof bounds_json) used = (size_t)bw;
-
-        const Move *move;
-        bool first = true;
-        foreach_move(move, &active_search->movelist) {
-            if (move->x < A1 || move->x > H8) continue;
+    if (active_search != NULL && active_search->result != NULL) {
+        int pv_x = active_search->result->move;
+        if (pv_x >= A1 && pv_x <= H8) {
             char coord[5];
-            square_to_coord(move->x, coord);
-            /* Use per-move search score instead of global bounds.
-             * Clamp to valid range; unsearched moves keep their
-             * heuristic ordering score (set by movelist_evaluate). */
-            int score = move->score;
+            square_to_coord(pv_x, coord);
+
+            /* Only the PV (best) move has an exact score from a full-window
+             * search.  Non-PV moves that fail-low only return the alpha
+             * bound — emitting them as "exact" scores would overwrite the
+             * accurate per-move evaluations from nativeHint. */
+            int score = active_search->result->score;
             if (score < SCORE_MIN) score = SCORE_MIN;
             if (score > SCORE_MAX) score = SCORE_MAX;
-            bw = snprintf(bounds_json + used, sizeof bounds_json - used,
-                "%s{\"x\":\"%s\",\"lo\":%d,\"hi\":%d,\"c\":%u}",
-                first ? "" : ",", coord, score, score, move->cost);
-            if (bw < 0 || (size_t)bw >= sizeof bounds_json - used) break;
-            used += (size_t)bw;
-            first = false;
-        }
 
-        bw = snprintf(bounds_json + used, sizeof bounds_json - used, "]}");
-        if (bw > 0 && (size_t)bw < sizeof bounds_json - used) {
-            used += (size_t)bw;
-            jstring jbounds = (*env)->NewStringUTF(env, bounds_json);
-            if (jbounds != NULL) {
-                (*env)->CallVoidMethod(env, g_callback_instance, g_callback_method, jbounds);
-                (*env)->DeleteLocalRef(env, jbounds);
+            char bounds_json[256];
+            int written = snprintf(bounds_json, sizeof bounds_json,
+                "{\"type\":\"bounds\",\"d\":%d,\"n\":%" PRIu64 ",\"moves\":["
+                "{\"x\":\"%s\",\"lo\":%d,\"hi\":%d,\"pv\":true}]}",
+                result->depth, result->n_nodes, coord, score, score);
+            if (written > 0 && (size_t)written < sizeof bounds_json) {
+                jstring jbounds = (*env)->NewStringUTF(env, bounds_json);
+                if (jbounds != NULL) {
+                    (*env)->CallVoidMethod(env, g_callback_instance, g_callback_method, jbounds);
+                    (*env)->DeleteLocalRef(env, jbounds);
+                }
             }
         }
     }
@@ -213,7 +243,8 @@ static void *cont_search_thread(void *arg)
     search_set_observer(search, cont_observer);
 
     search->options.verbosity = 0;   /* we drive output ourselves */
-    search->options.depth = 60;
+    search->options.force_observer = true;  /* fire observer on every depth iteration */
+    search->options.depth = 60;            /* hard ceiling; search_set_level sets real depth */
 
     search_set_board(search, &ctx->board, ctx->player);
     search_set_level(search, ctx->level, search->n_empties);
@@ -234,7 +265,13 @@ static void *cont_search_thread(void *arg)
     /* Final snapshot after search completes */
     cont_observer(search->result);
 
-    atomic_store(&g_active_search_ptr, 0);
+    /* Only clear the active pointer if it still belongs to THIS search.
+     * A newer search may have already overwritten it; a blind store to 0
+     * would orphan the new search (breaking getMoveBounds / snapshots). */
+    {
+        intptr_t expected = (intptr_t)search;
+        atomic_compare_exchange_strong(&g_active_search_ptr, &expected, 0);
+    }
     search_free(search);
     free(ctx);
     return NULL;
@@ -346,7 +383,32 @@ Java_com_eklos_astraia_EdaxContinuousBridge_nativeStartContinuousSearch(
     memcpy(ctx->board_text, text, 66);
     ctx->board_text[66] = '\0';
 
+    /* ── Board state verification: log ASCII grid + side to move ── */
+    {
+        const char *player_name = (player == BLACK) ? "Black(X)" : "White(O)";
+        CONT_LOGD("=== Board sent to engine (level=%d) ===", ctx->level);
+        CONT_LOGD("  Side to move: %s", player_name);
+        CONT_LOGD("  a b c d e f g h");
+        for (int r = 0; r < 8; ++r) {
+            char row[32];
+            int pos = 0;
+            for (int c = 0; c < 8; ++c) {
+                row[pos++] = ' ';
+                row[pos++] = text[r * 8 + c];  /* row-major: text[0..7]=rank1, text[8..15]=rank2, ... */
+            }
+            row[pos] = '\0';
+            CONT_LOGD("%d%s  %d", r + 1, row, r + 1);
+        }
+        CONT_LOGD("  a b c d e f g h");
+        CONT_LOGD("=== End board (empties=%d) ===", 64 - bit_count(board.player) - bit_count(board.opponent));
+    }
+
     (*env)->ReleaseStringUTFChars(env, board_text, text);
+
+    /* Reset observer throttle for the new search. */
+    g_last_emit_time_ms = 0;
+    g_last_emit_depth  = -1;
+    g_last_emit_score  = 0;
 
     /* Enable the observer callback. */
     atomic_store(&g_observer_active, true);

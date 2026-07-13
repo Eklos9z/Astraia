@@ -1,5 +1,6 @@
 package com.eklos.astraia
 
+import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.*
@@ -36,7 +37,9 @@ data class MoveBound(
     val lo: Int,
     val hi: Int,
     val depth: Int = 0,      // global depth at time of emission
-    val nodes: Long = 0L     // global nodes at time of emission
+    val nodes: Long = 0L,    // global nodes at time of emission
+    val isPv: Boolean = false // true if this is the PV (best) move with exact score;
+                              // non-PV moves only have alpha-bounds (fail-low values)
 )
 
 /**
@@ -80,6 +83,18 @@ object EdaxContinuousBridge {
     // ── Internal state ──────────────────────────────────────────
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /**
+     * Monotonic epoch counter incremented on every [startContinuousSearch].
+     *
+     * The [SearchUpdateCallback] snapshots the current epoch and discards any
+     * emission that arrives after a newer search has started.  This prevents
+     * a race where an old native search thread fires its observer callback
+     * AFTER the next [startContinuousSearch] has already launched, which
+     * would otherwise overwrite fresh bounds with stale data.
+     */
+    @Volatile
+    private var searchEpoch: Int = 0
 
     /**
      * Hot [SharedFlow] that carries live search updates.
@@ -181,6 +196,8 @@ object EdaxContinuousBridge {
         if (!initialized) return false
         // Stop any existing search cleanly.
         stopSearch()
+        // Invalidate any in-flight callbacks from the previous search.
+        searchEpoch++
         return nativeStartContinuousSearch(board, level, moveTimeMs)
     }
 
@@ -268,13 +285,23 @@ object EdaxContinuousBridge {
     @Suppress("unused") // called from JNI
     internal class SearchUpdateCallback {
         fun onSearchUpdate(json: String) {
+            val capturedEpoch = searchEpoch
+            // Log raw engine output for debugging missing evaluations
+            if (json.length <= 200) {
+                Log.d("EdaxRawOutput", "[observer] $json")
+            } else {
+                Log.d("EdaxRawOutput", "[observer] ${json.take(180)}… (${json.length} chars)")
+            }
             try {
                 val obj = JSONObject(json)
                 val type = obj.optString("type", "")
                 when (type) {
                     "bounds" -> {
-                        // Per-move bounds emission from enhanced cont_observer
-                        val arr = obj.optJSONArray("moves") ?: return
+                        val arr = obj.optJSONArray("moves")
+                        if (arr == null) {
+                            Log.w("EdaxRawOutput", "[observer] bounds type but no 'moves' array")
+                            return
+                        }
                         val depth = obj.optInt("d", 0)
                         val nodes = obj.optLong("n", 0L)
                         val bounds = (0 until arr.length()).map { i ->
@@ -284,15 +311,17 @@ object EdaxContinuousBridge {
                                 lo    = m.optInt("lo", Int.MIN_VALUE),
                                 hi    = m.optInt("hi", Int.MIN_VALUE),
                                 depth = depth,
-                                nodes = nodes
+                                nodes = nodes,
+                                isPv  = m.optBoolean("pv", false)
                             )
                         }
-                        if (bounds.isNotEmpty()) {
+                        Log.d("EdaxRawOutput", "[observer] parsed ${bounds.size} PV bounds at depth=$depth " +
+                            "(pvMoves=${bounds.filter { it.isPv }.map { it.move }})")
+                        if (capturedEpoch == searchEpoch && bounds.isNotEmpty()) {
                             _rawBoundsFlow.tryEmit(bounds)
                         }
                     }
                     else -> {
-                        // Legacy aggregate eval update (no "type" field)
                         val update = EvalUpdate(
                             depth    = obj.optInt("d", 0),
                             score    = obj.optInt("s", 0),
@@ -301,11 +330,13 @@ object EdaxContinuousBridge {
                             bestMove = obj.optString("m", ""),
                             movesLeft = obj.optInt("l", 0)
                         )
-                        _rawEvalFlow.tryEmit(update)
+                        if (capturedEpoch == searchEpoch) {
+                            _rawEvalFlow.tryEmit(update)
+                        }
                     }
                 }
-            } catch (_: Exception) {
-                // observer fires frequently — never crash on a malformed line
+            } catch (e: Exception) {
+                Log.e("EdaxRawOutput", "[observer] failed to parse JSON: ${e.message}", e)
             }
         }
     }
