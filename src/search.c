@@ -1066,6 +1066,29 @@ int64_t search_count_nodes(Search *search)
 }
 
 /**
+ * @brief Return the nodes per second (NPS) of a running search.
+ *
+ * Computes instantaneous NPS from the master search's total node count
+ * and elapsed time.  Reads global state without locking — the returned
+ * value is a "dirty read" snapshot suitable for live performance
+ * monitoring, not for precise benchmarking.
+ *
+ * @param search  Any search (its master is used for the computation).
+ * @return nodes per second, or 0.0 if the search hasn't started yet.
+ */
+double search_get_nps(const Search *search)
+{
+	const Search *master = search->master;
+	int64_t n = search_count_nodes((Search *)master);
+	if (n <= 0) return 0.0;
+	if (options.nps > 0) return (double)options.nps;  /* simulated / fixed-speed mode */
+
+	int64_t t = search_time((Search *)master);
+	if (t <= 0) return 0.0;
+	return 1000.0 * (double)n / (double)t;
+}
+
+/**
  * @brief default observer.
  *
  * @param result search results to print.

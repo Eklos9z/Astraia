@@ -219,7 +219,7 @@ class ThermalThrottleManager private constructor(
 
     companion object {
         /** Battery percentage below which we consider "low battery" (not charging). */
-        private const val LOW_BATTERY_PCT = 15.0f
+        private const val LOW_BATTERY_PCT = 20.0f
 
         /** Battery temperature thresholds in °C (fallback for API < 29). */
         private const val BATTERY_TEMP_WARMING  = 38.0f

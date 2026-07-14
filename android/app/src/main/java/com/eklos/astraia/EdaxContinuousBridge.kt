@@ -81,6 +81,8 @@ object EdaxContinuousBridge {
     @JvmStatic private external fun nativeIsSearchRunning(): Boolean
     @JvmStatic private external fun nativeRequestSnapshot()
     @JvmStatic private external fun nativeSetMaxParallelMoves(maxMoves: Int)
+    @JvmStatic private external fun nativeGetEngineNps(): Long
+    @JvmStatic private external fun nativeGetNodeCount(): Long
 
     // ── Internal state ──────────────────────────────────────────
 
@@ -274,6 +276,28 @@ object EdaxContinuousBridge {
             emptyList()
         }
     }
+
+    /**
+     * Return the current engine nodes-per-second (NPS).
+     *
+     * Reads the active search pointer without locking — the returned value
+     * is a "dirty read" snapshot suitable for live performance monitoring.
+     *
+     * @return nodes per second, or 0.0 if the engine is idle.
+     */
+    val engineNps: Double
+        get() {
+            val bits = nativeGetEngineNps()
+            return java.lang.Double.longBitsToDouble(bits)
+        }
+
+    /**
+     * Return the current engine total node count.
+     *
+     * @return total nodes searched, or 0 if idle.
+     */
+    val engineNodeCount: Long
+        get() = nativeGetNodeCount()
 
     /**
      * Request an immediate snapshot from the engine.

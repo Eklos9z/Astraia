@@ -111,13 +111,27 @@ private fun AstraiaMainContent(
                 .padding(8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Board panel — 55% width
-            BoardAnalysisPanel(
-                state = uiState,
-                isLightTheme = isLightTheme,
-                onMoveSelected = { move -> viewModel.playMove(move) },
-                modifier = Modifier.weight(0.55f)
-            )
+            // Left column: board + performance overlay — 55% width
+            Column(
+                modifier = Modifier.weight(0.55f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                BoardAnalysisPanel(
+                    state = uiState,
+                    isLightTheme = isLightTheme,
+                    onMoveSelected = { move -> viewModel.playMove(move) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                PerformanceOverlay(
+                    perfFlow = viewModel.perfFlow,
+                    thermalLevel = uiState.thermalStatus,
+                    isExpanded = uiState.performancePanelExpanded,
+                    onToggleExpand = { viewModel.togglePerformanceExpanded(!uiState.performancePanelExpanded) },
+                    enabled = uiState.showPerformancePanel,
+                    onToggleEnabled = { viewModel.togglePerformancePanel(it) }
+                )
+            }
 
             // Analysis sidebar — 45% width
             AnalysisSidebar(
@@ -140,18 +154,27 @@ private fun AstraiaMainContent(
             )
         }
     } else {
-        // Portrait: board on top, sidebar scrolls below
+        // Portrait: board on top, perf overlay, sidebar scrolls below
         Column(
             modifier = modifier
                 .fillMaxWidth()
                 .padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             BoardAnalysisPanel(
                 state = uiState,
                 isLightTheme = isLightTheme,
                 onMoveSelected = { move -> viewModel.playMove(move) },
                 modifier = Modifier.fillMaxWidth()
+            )
+
+            PerformanceOverlay(
+                perfFlow = viewModel.perfFlow,
+                thermalLevel = uiState.thermalStatus,
+                isExpanded = uiState.performancePanelExpanded,
+                onToggleExpand = { viewModel.togglePerformanceExpanded(!uiState.performancePanelExpanded) },
+                enabled = uiState.showPerformancePanel,
+                onToggleEnabled = { viewModel.togglePerformancePanel(it) }
             )
 
             AnalysisSidebar(

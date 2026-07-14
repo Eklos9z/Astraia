@@ -697,3 +697,46 @@ Java_com_eklos_astraia_EdaxContinuousBridge_nativeRequestSnapshot(
         cont_observer(search->result);
     }
 }
+
+/**
+ * Return the current engine nodes-per-second (NPS).
+ *
+ * Reads the active search pointer without locking — the returned value
+ * is a "dirty read" snapshot suitable for live performance monitoring.
+ *
+ * @return nodes per second as a jlong (double-bytes-as-long), or 0 if idle.
+ */
+JNIEXPORT jlong JNICALL
+Java_com_eklos_astraia_EdaxContinuousBridge_nativeGetEngineNps(
+    JNIEnv *env, jclass clazz)
+{
+    (void)env;
+    (void)clazz;
+
+    Search *search = (Search *)atomic_load(&g_active_search_ptr);
+    if (search == NULL) return 0;
+
+    double nps = search_get_nps(search);
+    /* Transmit the double's bit pattern in a jlong so Kotlin can
+     * reinterpret it with java.lang.Double.longBitsToDouble(). */
+    union { double d; int64_t i; } u;
+    u.d = nps;
+    return (jlong)u.i;
+}
+
+/**
+ * Return the current engine total node count.
+ *
+ * @return total nodes searched, or 0 if idle.
+ */
+JNIEXPORT jlong JNICALL
+Java_com_eklos_astraia_EdaxContinuousBridge_nativeGetNodeCount(
+    JNIEnv *env, jclass clazz)
+{
+    (void)env;
+    (void)clazz;
+
+    Search *search = (Search *)atomic_load(&g_active_search_ptr);
+    if (search == NULL) return 0;
+    return (jlong)search_count_nodes((Search *)(search->master));
+}

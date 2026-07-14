@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -42,7 +43,10 @@ data class AnalysisUiState(
     val showUmigame: Boolean = false,
     val searchLevel: Int = 15,
     val parallelCount: Int = 0, // 0 = all (unlimited); 1 = PV only; N = top N
-    val statusMessage: String? = null
+    val statusMessage: String? = null,
+    // Performance monitoring
+    val showPerformancePanel: Boolean = BuildConfig.DEBUG,  // debug=visible, release=hidden
+    val performancePanelExpanded: Boolean = false           // expand/collapse detail
 )
 
 /**
@@ -69,11 +73,29 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
     private val _uiState = MutableStateFlow(AnalysisUiState())
     val uiState: StateFlow<AnalysisUiState> = _uiState.asStateFlow()
 
+    // ── Performance monitoring ──────────────────────────────────
+    private val cpuMonitor = CpuMonitor.getInstance()
+    private val perfUseCase = PerformanceStreamUseCase(cpuMonitor, EdaxContinuousBridge)
+    private val _perfFlow = MutableSharedFlow<PerfSnapshot>(
+        replay = 0,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    /** Public performance snapshot stream for the UI overlay. */
+    val perfFlow: SharedFlow<PerfSnapshot> = _perfFlow.asSharedFlow()
+
+    /** Whether the user has the performance panel enabled globally. */
+    private var perfPanelEnabled = BuildConfig.DEBUG
+    /** Whether the detail panel is expanded. */
+    private var perfPanelExpanded = false
+
     // ── Search coordination ─────────────────────────────────────
     /** Monotonic generation counter so stale results are discarded. */
     private val searchGeneration = AtomicInteger(0)
     /** Debounce job for search-level slider changes. */
     private var searchLevelJob: Job? = null
+    /** Performance collection job. */
+    private var perfCollectionJob: Job? = null
 
     init {
         // One-time initialisation of the native bridge.
@@ -134,10 +156,12 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         // Observe thermal state changes.
         viewModelScope.launch {
             thermalManager.thermalState.collect { level ->
+                // Configured (normal) thread count, initialised in MainActivity.
+                val configuredThreads = EdaxContinuousBridge.threadCount.coerceAtLeast(1)
                 val threads = when (level) {
-                    ThermalThrottleManager.ThermalLevel.OK       -> 4
-                    ThermalThrottleManager.ThermalLevel.WARMING  -> 2
-                    ThermalThrottleManager.ThermalLevel.SEVERE   -> 1
+                    ThermalThrottleManager.ThermalLevel.OK       -> configuredThreads
+                    ThermalThrottleManager.ThermalLevel.WARMING  -> maxOf(1, configuredThreads / 2)
+                    ThermalThrottleManager.ThermalLevel.SEVERE   -> maxOf(1, configuredThreads / 4)
                     ThermalThrottleManager.ThermalLevel.CRITICAL -> 1
                 }
                 EdaxContinuousBridge.setThreadCount(threads)
@@ -158,6 +182,13 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
                 if (level == ThermalThrottleManager.ThermalLevel.CRITICAL) {
                     stopAnalysis()
                 }
+            }
+        }
+
+        // Performance monitoring collection (always runs; UI toggle just hides the panel)
+        perfCollectionJob = viewModelScope.launch(Dispatchers.Default) {
+            perfUseCase.perfSnapshots(200L).collect { snap ->
+                _perfFlow.tryEmit(snap)
             }
         }
     }
@@ -506,10 +537,24 @@ class AnalysisViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { it.copy(statusMessage = null) }
     }
 
+    /** Toggle the performance overlay on/off. */
+    fun togglePerformancePanel(enabled: Boolean) {
+        perfPanelEnabled = enabled
+        _uiState.update { it.copy(showPerformancePanel = enabled) }
+    }
+
+    /** Expand or collapse the performance panel detail view. */
+    fun togglePerformanceExpanded(expanded: Boolean) {
+        perfPanelExpanded = expanded
+        _uiState.update { it.copy(performancePanelExpanded = expanded) }
+    }
+
     override fun onCleared() {
         super.onCleared()
         searchLevelJob?.cancel()
+        perfCollectionJob?.cancel()
         stopAnalysis()
         thermalManager.shutdown()
+        cpuMonitor.shutdown()
     }
 }

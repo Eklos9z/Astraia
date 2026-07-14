@@ -170,6 +170,7 @@ void search_restore_pass_midgame(Search*);
 int64_t search_clock(Search*);
 int64_t search_time(Search*);
 int64_t search_count_nodes(Search*);
+double search_get_nps(const Search*);
 void search_print_pv(Search*, const int, const char*, FILE*);
 void search_print(Search*, const int, const int, const char, FILE*);
 int get_pv_extension(const int, const int);
